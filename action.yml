@@ -1,0 +1,139 @@
+name: "SRA-RiskGate payment check"
+description: "Fail a CI job unless a stablecoin payment would be approved: OFAC match, blocklist, new-payee hold, limits, or a full SRA-RiskGate-4B review."
+author: "Sriram Ramakrishnan"
+branding:
+  icon: "shield"
+  color: "green"
+
+inputs:
+  mode:
+    description: "rules (SDK checks, seconds, no model) or model (SRA-RiskGate-4B reviews a fixture on the runner's CPU)"
+    default: "rules"
+  allow:
+    description: "Highest decision that passes: approve (default), hold or reject"
+    default: "approve"
+  # rules mode
+  chain-id:
+    description: "rules: EVM chain id, 1 (Ethereum), 8453 (Base) or 84532 (Base Sepolia)"
+    default: ""
+  sender:
+    description: "rules: paying wallet address"
+    default: ""
+  recipient:
+    description: "rules: address being paid"
+    default: ""
+  amount-usdc:
+    description: "rules: amount in whole USDC, for example 20.5"
+    default: ""
+  peg-deviation-pct:
+    description: "rules: USDC's deviation from $1.00 in percent; empty if unknown (the check is then skipped and reported)"
+    default: ""
+  max-amount:
+    description: "rules: per-payment ceiling in USDC; larger payments are held"
+    default: "1000"
+  untrusted-text:
+    description: "rules: the payment's memo or request text exactly as received"
+    default: ""
+  known-recipients:
+    description: "rules: verified payees (comma, space or newline separated). If set, any other recipient is held"
+    default: ""
+  known-recipients-file:
+    description: "rules: file with one verified payee per line (# comments allowed), added to known-recipients"
+    default: ""
+  blocked-addresses:
+    description: "rules: addresses to always reject"
+    default: ""
+  # model mode
+  fixture:
+    description: "model: JSON file with now_unix, policy, payload and tool_results (the model's training format)"
+    default: ""
+  model-repo:
+    description: "model: Hugging Face repo holding the GGUF"
+    default: "sriram1983007/SRA-RiskGate-4B-GGUF"
+  model-file:
+    description: "model: GGUF file in that repo"
+    default: "SRA-RiskGate-4B-Q4_K_M.gguf"
+  cache-model:
+    description: "model: cache the GGUF between runs with actions/cache (true or false)"
+    default: "true"
+
+outputs:
+  decision:
+    description: "approve, hold or reject"
+    value: ${{ steps.check.outputs.decision }}
+  flags:
+    description: "JSON list of reason codes"
+    value: ${{ steps.check.outputs.flags }}
+  result:
+    description: "The full verdict as JSON"
+    value: ${{ steps.check.outputs.result }}
+
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install SRA-RiskGate
+      shell: bash
+      env:
+        MODE: ${{ inputs.mode }}
+      run: |
+        python -m pip install --quiet "sra-riskgate>=0.8.0" "sra-riskgate-mcp>=0.5.0"
+        if [ "$MODE" = "model" ]; then
+          python -m pip install --quiet "huggingface_hub>=0.24" llama-cpp-python \
+            --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+        fi
+
+    - name: Restore cached model
+      if: inputs.mode == 'model' && inputs.cache-model == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/sra-riskgate
+        key: sra-riskgate-${{ inputs.model-repo }}-${{ inputs.model-file }}
+
+    - name: Download model
+      id: model
+      if: inputs.mode == 'model'
+      shell: bash
+      env:
+        REPO: ${{ inputs.model-repo }}
+        FILE: ${{ inputs.model-file }}
+      run: |
+        path=$(python -c "import os; from huggingface_hub import hf_hub_download; print(hf_hub_download(os.environ['REPO'], os.environ['FILE'], local_dir=os.path.expanduser('~/.cache/sra-riskgate')))")
+        echo "path=$path" >> "$GITHUB_OUTPUT"
+
+    - name: Check payment
+      id: check
+      shell: bash
+      env:
+        INPUT_MODE: ${{ inputs.mode }}
+        INPUT_ALLOW: ${{ inputs.allow }}
+        INPUT_CHAIN_ID: ${{ inputs.chain-id }}
+        INPUT_SENDER: ${{ inputs.sender }}
+        INPUT_RECIPIENT: ${{ inputs.recipient }}
+        INPUT_AMOUNT_USDC: ${{ inputs.amount-usdc }}
+        INPUT_PEG_DEVIATION_PCT: ${{ inputs.peg-deviation-pct }}
+        INPUT_MAX_AMOUNT: ${{ inputs.max-amount }}
+        INPUT_UNTRUSTED_TEXT: ${{ inputs.untrusted-text }}
+        INPUT_KNOWN_RECIPIENTS: ${{ inputs.known-recipients }}
+        INPUT_KNOWN_RECIPIENTS_FILE: ${{ inputs.known-recipients-file }}
+        INPUT_BLOCKED_ADDRESSES: ${{ inputs.blocked-addresses }}
+        INPUT_FIXTURE: ${{ inputs.fixture }}
+        INPUT_MODEL_PATH: ${{ steps.model.outputs.path }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set +e
+        python "$ACTION_PATH/check.py"
+        echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+        exit 0
+
+    - name: Enforce decision
+      if: steps.check.outputs.exit_code != '0'
+      shell: bash
+      env:
+        DECISION: ${{ steps.check.outputs.decision }}
+      run: |
+        echo "SRA-RiskGate decision '${DECISION:-unknown}' is not allowed; failing the job."
+        exit 1
