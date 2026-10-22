@@ -30,6 +30,25 @@ Every error (bad input, missing file, model failure, off-schema output) is a `ho
 Known payees come only from your repository, never from the agent's output, so a manipulated agent cannot
 mark an attacker's address as known.
 
+### Check the exact calldata your agent produced
+
+Pass raw ERC-20 `transfer` calldata as `payload` and the Action decodes the recipient and amount itself:
+
+```yaml
+- name: Validate agent calldata risk
+  uses: sriram1983007-dev/sra-riskgate-action@v1
+  with:
+    chain-id: 8453
+    sender: ${{ vars.TREASURY_WALLET }}
+    token-address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"   # USDC on Base
+    payload: ${{ steps.tx.outputs.calldata }}                       # 0xa9059cbb...
+    known-recipients-file: config/verified-payees.txt
+```
+
+Anything else (another function, a truncated or malformed payload, a token that isn't USDC on that chain)
+is held. If you also pass `recipient` or `amount-usdc` and they disagree with the calldata, the payment is
+held with `PAYLOAD_MISMATCH`.
+
 ## Model mode
 
 Write payment fixtures in the model's training format (`now_unix`, `policy`, `payload`, `tool_results`),
@@ -55,10 +74,13 @@ asking the model.
 | `chain-id`, `sender`, `recipient`, `amount-usdc` | | rules: the payment (amount in whole USDC) |
 | `peg-deviation-pct` | empty | rules: USDC's deviation from $1.00 in percent; empty means unknown, and the depeg check is skipped and reported |
 | `max-amount` | `1000` | rules: per-payment ceiling in USDC |
+| `payload` | | rules: raw ERC-20 `transfer` calldata; recipient and amount are decoded from it |
+| `token-address` | | rules: the token contract the calldata goes to; if set, it must be USDC on `chain-id` |
 | `untrusted-text` | | rules: the payment's memo or request text as received |
 | `known-recipients`, `known-recipients-file` | | rules: verified payees; any other recipient is held |
 | `blocked-addresses` | | rules: always rejected |
 | `fixture` | | model: path to the fixture JSON |
+| `model` | | model: shortcut for `model-repo`; `sriram1983007/SRA-RiskGate-4B` uses its GGUF build |
 | `model-repo`, `model-file` | `sriram1983007/SRA-RiskGate-4B-GGUF`, `SRA-RiskGate-4B-Q4_K_M.gguf` | model: which GGUF to run |
 | `cache-model` | `true` | model: cache the GGUF with `actions/cache` |
 

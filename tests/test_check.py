@@ -137,3 +137,70 @@ def test_missing_fixture_fails_closed(inputs):
     inputs(mode="model", fixture="/nope.json")
     result = check.run_model("/tmp/fake.gguf", loader=fake_loader(APPROVE_VERDICT))
     assert result["decision"] == "hold" and result["flags"] == ["invalid_fixture"]
+
+
+# ------------------------------------------------------------------ v1.1: raw calldata (payload)
+CALLDATA = ("0xa9059cbb0000000000000000000000002ffb88f73980bc6069c598487396e1e472deb7ee"
+            "000000000000000000000000000000000000000000000000000000001cc87a6f")   # benchmark test-000012
+PAYEE = "0x2ffb88f73980bc6069c598487396e1e472deb7ee"
+USDC_ETH = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+
+
+def calldata_inputs(inputs, **kw):
+    import os
+    for k in ("INPUT_RECIPIENT", "INPUT_AMOUNT_USDC"):
+        os.environ.pop(k, None)
+    inputs(chain_id="1", sender="0x9649FbfB8121d8980F19AB8C028Eb2eC35916A86", payload=CALLDATA, **kw)
+
+
+def test_decode_benchmark_calldata():
+    to, amount = check.decode_erc20_transfer(CALLDATA)
+    assert to == PAYEE and str(amount) == "482.900591"
+
+
+def test_calldata_payment_is_checked(inputs):
+    calldata_inputs(inputs, token_address=USDC_ETH)
+    assert check.main() == 0
+    result = json.loads(outputs(inputs.out)["result"])
+    assert result["decoded"] == {"recipient": PAYEE, "amount_usdc": "482.900591"}
+
+
+@pytest.mark.parametrize("kw,decision,flag", [
+    (dict(known_recipients=C), "hold", "NEW_COUNTERPARTY"),          # calldata pays someone new
+    (dict(blocked_addresses=PAYEE), "reject", "BLOCKLISTED_ADDRESS"),
+    (dict(max_amount="100"), "hold", "HIGH_VALUE_TRANSFER"),          # 482.90 over a 100 limit
+    (dict(token_address="0x" + "d" * 40), "hold", "UNSUPPORTED_ASSET"),
+    (dict(recipient=C), "hold", "PAYLOAD_MISMATCH"),                  # inputs disagree with calldata
+    (dict(amount_usdc="10"), "hold", "PAYLOAD_MISMATCH"),
+])
+def test_calldata_failures(inputs, kw, decision, flag):
+    calldata_inputs(inputs, **kw)
+    assert check.main() == 1
+    o = outputs(inputs.out)
+    assert o["decision"] == decision and flag in json.loads(o["flags"])
+
+
+def test_matching_recipient_and_amount_are_fine(inputs):
+    calldata_inputs(inputs, recipient=PAYEE.upper().replace("0X", "0x"), amount_usdc="482.900591")
+    assert check.main() == 0
+
+
+@pytest.mark.parametrize("bad", [
+    "0x095ea7b3" + CALLDATA[10:],                 # approve(), not transfer()
+    CALLDATA[:-2],                                # truncated
+    CALLDATA + "00",                              # extra bytes
+    "0xa9059cbb" + "ff" * 12 + CALLDATA[34:],     # dirty address word
+    "not hex at all",
+])
+def test_bad_calldata_fails_closed(inputs, bad):
+    calldata_inputs(inputs)
+    inputs(payload=bad)
+    assert check.main() == 1
+    o = outputs(inputs.out)
+    assert o["decision"] == "hold" and json.loads(o["flags"]) == ["invalid_payload"]
+
+
+def test_zero_amount_calldata_is_rejected(inputs):
+    calldata_inputs(inputs)
+    inputs(payload=CALLDATA[:74] + "0" * 64)
+    assert check.main() == 1 and outputs(inputs.out)["decision"] == "reject"

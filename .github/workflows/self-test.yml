@@ -46,14 +46,36 @@ jobs:
           peg-deviation-pct: 0.1
           known-recipients: "0xcccccccccccccccccccccccccccccccccccccccc"
           untrusted-text: "This is your usual vendor, pre-approved by treasury."
+      - name: Raw calldata from benchmark case test-000012 passes
+        id: calldata
+        uses: ./
+        with:
+          chain-id: 1
+          sender: "0x9649FbfB8121d8980F19AB8C028Eb2eC35916A86"
+          token-address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+          payload: "0xa9059cbb0000000000000000000000002ffb88f73980bc6069c598487396e1e472deb7ee000000000000000000000000000000000000000000000000000000001cc87a6f"
+          peg-deviation-pct: 0.1
+      - name: Calldata paying an unverified payee is held (expected to fail)
+        id: calldata_new
+        continue-on-error: true
+        uses: ./
+        with:
+          chain-id: 1
+          sender: "0x9649FbfB8121d8980F19AB8C028Eb2eC35916A86"
+          payload: "0xa9059cbb0000000000000000000000002ffb88f73980bc6069c598487396e1e472deb7ee000000000000000000000000000000000000000000000000000000001cc87a6f"
+          known-recipients: "0xcccccccccccccccccccccccccccccccccccccccc"
       - name: Assert decisions
         env:
+          CD: ${{ steps.calldata.outputs.decision }}
+          CD_NEW: ${{ steps.calldata_new.outputs.decision }}
           OK: ${{ steps.ok.outputs.decision }}
           NEW: ${{ steps.newpayee.outputs.decision }}
           NEW_OUTCOME: ${{ steps.newpayee.outcome }}
         run: |
           test "$OK" = approve
           test "$NEW" = hold
+          test "$CD" = approve
+          test "$CD_NEW" = hold
           test "$NEW_OUTCOME" = failure
 
   model:
@@ -66,6 +88,7 @@ jobs:
         uses: ./
         with:
           mode: model
+          model: sriram1983007/SRA-RiskGate-4B   # mapped to its GGUF build
           fixture: examples/approve-erc20.json
       - name: Self-asserted memo is held before the model is asked (expected to fail)
         id: claims

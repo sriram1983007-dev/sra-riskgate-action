@@ -31,6 +31,12 @@ inputs:
   max-amount:
     description: "rules: per-payment ceiling in USDC; larger payments are held"
     default: "1000"
+  payload:
+    description: "rules: raw ERC-20 transfer calldata (0xa9059cbb...) your agent produced; recipient and amount are decoded from it"
+    default: ""
+  token-address:
+    description: "rules: the token contract the calldata is sent to; if given, it must be USDC on chain-id"
+    default: ""
   untrusted-text:
     description: "rules: the payment's memo or request text exactly as received"
     default: ""
@@ -46,6 +52,9 @@ inputs:
   # model mode
   fixture:
     description: "model: JSON file with now_unix, policy, payload and tool_results (the model's training format)"
+    default: ""
+  model:
+    description: "model: shortcut for model-repo; sriram1983007/SRA-RiskGate-4B maps to its GGUF repo"
     default: ""
   model-repo:
     description: "model: Hugging Face repo holding the GGUF"
@@ -91,16 +100,21 @@ runs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/sra-riskgate
-        key: sra-riskgate-${{ inputs.model-repo }}-${{ inputs.model-file }}
+        key: sra-riskgate-${{ inputs.model || inputs.model-repo }}-${{ inputs.model-file }}
 
     - name: Download model
       id: model
       if: inputs.mode == 'model'
       shell: bash
       env:
+        MODEL: ${{ inputs.model }}
         REPO: ${{ inputs.model-repo }}
         FILE: ${{ inputs.model-file }}
       run: |
+        # The full-precision repo is too large for a CPU runner; use its GGUF build instead.
+        if [ -n "$MODEL" ]; then REPO="$MODEL"; fi
+        if [ "$REPO" = "sriram1983007/SRA-RiskGate-4B" ]; then REPO="sriram1983007/SRA-RiskGate-4B-GGUF"; fi
+        export REPO
         path=$(python -c "import os; from huggingface_hub import hf_hub_download; print(hf_hub_download(os.environ['REPO'], os.environ['FILE'], local_dir=os.path.expanduser('~/.cache/sra-riskgate')))")
         echo "path=$path" >> "$GITHUB_OUTPUT"
 
@@ -116,6 +130,8 @@ runs:
         INPUT_AMOUNT_USDC: ${{ inputs.amount-usdc }}
         INPUT_PEG_DEVIATION_PCT: ${{ inputs.peg-deviation-pct }}
         INPUT_MAX_AMOUNT: ${{ inputs.max-amount }}
+        INPUT_PAYLOAD: ${{ inputs.payload }}
+        INPUT_TOKEN_ADDRESS: ${{ inputs.token-address }}
         INPUT_UNTRUSTED_TEXT: ${{ inputs.untrusted-text }}
         INPUT_KNOWN_RECIPIENTS: ${{ inputs.known-recipients }}
         INPUT_KNOWN_RECIPIENTS_FILE: ${{ inputs.known-recipients-file }}

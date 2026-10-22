@@ -17,6 +17,7 @@ import json
 import os
 import sys
 import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Optional
 
@@ -41,14 +42,58 @@ def hold(flag: str, explanation: str) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ rules mode
+TRANSFER_SELECTOR = "a9059cbb"  # transfer(address,uint256)
+USDC_DECIMALS = 6
+
+
+def decode_erc20_transfer(data: str) -> tuple[str, Decimal]:
+    """Recipient and USDC amount from ERC-20 transfer calldata. Raises ValueError on anything else."""
+    h = data.strip().lower()
+    h = h[2:] if h.startswith("0x") else h
+    if len(h) != 8 + 64 + 64 or any(c not in "0123456789abcdef" for c in h):
+        raise ValueError("payload must be ERC-20 transfer calldata: 0xa9059cbb + 32-byte address + 32-byte amount")
+    if h[:8] != TRANSFER_SELECTOR:
+        raise ValueError(f"payload is not an ERC-20 transfer (selector 0x{h[:8]}, expected 0x{TRANSFER_SELECTOR})")
+    addr_word, amount_word = h[8:72], h[72:]
+    if addr_word[:24] != "0" * 24:
+        raise ValueError("payload recipient is not a valid 20-byte address")
+    return "0x" + addr_word[24:], Decimal(int(amount_word, 16)) / (Decimal(10) ** USDC_DECIMALS)
+
+
 def run_rules() -> dict[str, Any]:
     from sra_riskgate import check_payment
+    from sra_riskgate.chains import is_usdc
 
     try:
         chain_id = int(env("chain-id"))
-        amount = float(env("amount-usdc"))
     except ValueError:
-        return hold("invalid_inputs", "chain-id must be an integer and amount-usdc a number.")
+        return hold("invalid_inputs", "chain-id must be an integer.")
+
+    recipient, amount_text = env("recipient"), env("amount-usdc")
+    payload = env("payload")
+    if payload:
+        try:
+            decoded_to, decoded_amount = decode_erc20_transfer(payload)
+        except ValueError as e:
+            return hold("invalid_payload", str(e))
+        token = env("token-address")
+        if token and not is_usdc(chain_id, token):
+            return hold("UNSUPPORTED_ASSET", f"token-address {token} is not USDC on chain {chain_id}.")
+        # Inputs that disagree with the calldata are a red flag in their own right: hold.
+        if recipient and recipient.lower() != decoded_to:
+            return hold("PAYLOAD_MISMATCH", f"recipient {recipient} differs from the calldata's {decoded_to}.")
+        if amount_text:
+            try:
+                if Decimal(amount_text) != decoded_amount:
+                    return hold("PAYLOAD_MISMATCH",
+                                f"amount-usdc {amount_text} differs from the calldata's {decoded_amount}.")
+            except InvalidOperation:
+                return hold("invalid_inputs", "amount-usdc must be a number.")
+        recipient, amount_text = decoded_to, format(decoded_amount, "f")
+    try:
+        amount = float(amount_text)
+    except ValueError:
+        return hold("invalid_inputs", "amount-usdc must be a number (or pass payload calldata).")
     peg_text = env("peg-deviation-pct")
     try:
         peg = float(peg_text) if peg_text else None
@@ -63,12 +108,15 @@ def run_rules() -> dict[str, Any]:
             return hold("invalid_inputs", f"Could not read known-recipients-file: {e}")
         known = (known or []) + [ln.split("#", 1)[0].strip() for ln in lines if ln.split("#", 1)[0].strip()]
     result = check_payment(
-        chain_id=chain_id, sender=env("sender"), recipient=env("recipient"), amount=amount,
+        chain_id=chain_id, sender=env("sender"), recipient=recipient, amount=amount,
         peg_deviation_pct=peg, untrusted_request=env("untrusted-text") or None,
         max_amount=float(env("max-amount", "1000") or 1000),
         known_recipients=known, blocked_addresses=address_list(env("blocked-addresses")),
     )
-    return {**result.model_dump(mode="json"), "source": "rules"}
+    out = {**result.model_dump(mode="json"), "source": "rules"}
+    if payload:
+        out["decoded"] = {"recipient": recipient, "amount_usdc": amount_text}
+    return out
 
 
 # ------------------------------------------------------------------ model mode
