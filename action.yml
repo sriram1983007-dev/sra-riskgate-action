@@ -1,5 +1,5 @@
 name: "SRA-RiskGate payment check"
-description: "Fail a CI job unless a stablecoin payment would be approved: OFAC match, blocklist, new-payee hold, limits, or a full SRA-RiskGate-4B review."
+description: "Fail CI unless a stablecoin payment would be approved: OFAC match, blocklist, new-payee hold, limits or a model review."
 author: "Sriram Ramakrishnan"
 branding:
   icon: "shield"
