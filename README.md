@@ -13,6 +13,55 @@ vouches for itself, the build goes red before it ships.
 
 Every error (bad input, missing file, model failure, off-schema output) is a `hold`, so it fails the job.
 
+## Recommended setup
+
+Run the fast rule checks on every pull request, and the full model review of your payment fixtures
+nightly and before a release. Copy this to `.github/workflows/payment-checks.yml`:
+
+```yaml
+name: payment-checks
+
+on:
+  pull_request:
+  schedule:
+    - cron: "17 6 * * *"   # nightly
+  workflow_dispatch:
+
+jobs:
+  rules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Produce the transaction your agent would send, then check it
+      - id: tx
+        run: echo "calldata=$(python scripts/agent_dry_run.py)" >> "$GITHUB_OUTPUT"
+      - uses: sriram1983007-dev/sra-riskgate-action@v1
+        with:
+          chain-id: 8453
+          sender: ${{ vars.TREASURY_WALLET }}
+          token-address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"   # USDC on Base
+          payload: ${{ steps.tx.outputs.calldata }}
+          known-recipients-file: config/verified-payees.txt
+
+  model:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fixture: [tests/payments/invoice-known-vendor.json, tests/payments/refund-to-new-address.json]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: sriram1983007-dev/sra-riskgate-action@v1
+        with:
+          mode: model
+          fixture: ${{ matrix.fixture }}
+```
+
+Replace `scripts/agent_dry_run.py` with whatever produces your agent's transaction, and write fixtures in
+the format of [`examples/approve-erc20.json`](examples/approve-erc20.json). A fixture you expect to be held
+can use `allow: hold`.
+
 ## Rules mode
 
 ```yaml
